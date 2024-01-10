@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.79"
 eframe = { version = "0.25.0", default-features = false, features = [
     "default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
@@ -16,4 +17,5 @@ env_logger = "0.10.1"
 log = "0.4.20"
 rfd = "0.12.1"
 serde = {version = "1.0.195", features = ["derive"]}
-wpass = {git = "https://github.com/asternight/wpass.git", branch = "master"}
+tokio = {version = "1.35.1", features = ["rt"]}
+wpass = {git = "https://github.com/AsterNighT/wpass.git", branch = "master"}

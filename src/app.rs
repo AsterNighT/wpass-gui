@@ -1,10 +1,13 @@
 use egui::{Align2, Color32, DroppedFile, Id, LayerId, Order, TextStyle, Vec2};
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+use crate::worker::{Showcase, Task};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 enum ExtractionMode {
@@ -28,10 +31,12 @@ pub struct WpassApp {
     extraction_mode: ExtractionMode,
     delete_after_extract: bool,
     sanitize: bool,
-    #[serde(skip)] // This how you opt-out of serialization of a field
+    #[serde(skip)]
     menu_state: MenuState,
-    #[serde(skip)] // This how you opt-out of serialization of a field
+    #[serde(skip)]
     passwords: Option<String>,
+    #[serde(skip)]
+    task_showcase: Showcase<()>,
 }
 
 impl Default for WpassApp {
@@ -44,6 +49,7 @@ impl Default for WpassApp {
             sanitize: true,
             menu_state: MenuState::Main,
             passwords: None,
+            task_showcase: Showcase::new(),
         }
     }
 }
@@ -63,29 +69,75 @@ impl WpassApp {
         Default::default()
     }
 
-    fn generate_reg(&self) {}
+    pub fn init(&mut self) {
+        debug!("Initializing app");
+        self.update_passwords_from_file();
+    }
+
     fn update_passwords_from_file(&mut self) {
-        // This should happen only when password menu is clicked.
+        debug!("Updating passwords");
         let password_file_pathbuf = PathBuf::from(&self.password_file_path);
         if Path::is_file(&password_file_pathbuf) {
-            // A chance is that the password is retrieved and updated. In this function we always assume the password file is the most up-to-date. The memory-to-file overwrite happens elsewhere.
             self.passwords = Some(fs::read_to_string(&password_file_pathbuf).unwrap());
         } else {
             self.passwords = None;
         }
+        debug!("Passwords updated to {:?}", self.passwords);
     }
 
     fn update_passwords_to_file(&mut self) {
+        debug!("Writing passwords to {}", self.password_file_path);
         // Let filesystem handle the file sync issue.
-        // Start a new thread to do the job? 
+        // Start a new thread to do the job?
         let password_file_pathbuf = PathBuf::from(&self.password_file_path);
         if Path::is_file(&password_file_pathbuf) && self.passwords.is_some() {
             fs::write(&password_file_pathbuf, self.passwords.as_ref().unwrap()).unwrap();
         }
     }
 
-    fn handle_files(&mut self, files: &Vec<DroppedFile>) {
-        
+    fn try_sanitize_passwords(&mut self) {
+        debug!("Sanitizing passwords");
+        if self.sanitize {
+            if let Some(passwords) = &mut self.passwords {
+                let mut dict = passwords.split('\n').map(|s| s.trim()).collect::<Vec<_>>();
+                dict.sort();
+                dict.dedup();
+                *passwords = dict.join("\n");
+            }
+        }
+    }
+
+    fn schedule_files(&mut self, files: &Vec<DroppedFile>) {
+        for file in files {
+            debug!("Handling file {:?}", file.path);
+            if let Some(path) = &file.path {
+                debug!("Extracting file {:?}", path);
+                let task = Task::new(path.display().to_string(), task);
+                self.task_showcase.display_task(move || {
+                    let mut cmd = std::process::Command::new("7z");
+                    cmd.arg("x");
+                    cmd.arg("-y");
+                    cmd.arg("-p");
+                    cmd.arg(&self.passwords.as_ref().unwrap());
+                    cmd.arg(path);
+                    match self.extraction_mode {
+                        ExtractionMode::Local => {
+                            cmd.arg("-o*");
+                        }
+                        ExtractionMode::NewDirectory => {
+                            cmd.arg("-o*");
+                            cmd.arg("-r");
+                        }
+                    }
+                    let output = cmd.output().unwrap();
+                    debug!("7z output: {:?}", output);
+                    if self.delete_after_extract {
+                        debug!("Deleting file {:?}", path);
+                        fs::remove_file(path).unwrap();
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -103,20 +155,13 @@ impl eframe::App for WpassApp {
             // The top panel is often a good place for a menu bar:
             egui::menu::bar(ui, |ui| {
                 if ui.button("Main").clicked() {
-                    self.update_passwords_to_file();
                     self.menu_state = MenuState::Main;
                 }
                 if ui.button("Settings").clicked() {
                     self.menu_state = MenuState::Setting;
                 }
                 if ui.button("Passwords").clicked() {
-                    self.update_passwords_from_file();
                     self.menu_state = MenuState::Password;
-                }
-                if cfg!(windows) {
-                    if ui.button("Install rightclick menu").clicked() {
-                        self.generate_reg();
-                    }
                 }
             });
         });
@@ -169,7 +214,7 @@ impl eframe::App for WpassApp {
                 }
                 ctx.input(|i| {
                     if !i.raw.dropped_files.is_empty() {
-                        self.handle_files(&i.raw.dropped_files);
+                        self.schedule_files(&i.raw.dropped_files);
                     }
                 });
             }
@@ -184,14 +229,18 @@ impl eframe::App for WpassApp {
                         .show(ui, |ui| {
                             ui.label("Path to password file:");
                             ui.horizontal(|ui| {
-                                ui.add_sized(
+                                let response = ui.add_sized(
                                     ui.available_size() - Vec2::new(60.0, 0.0),
                                     egui::TextEdit::singleline(&mut self.password_file_path),
                                 );
+                                if response.lost_focus() {
+                                    self.update_passwords_from_file();
+                                }
                                 if ui.button("Browse").clicked() {
                                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                                         self.password_file_path = path.display().to_string();
                                     }
+                                    self.update_passwords_from_file();
                                 }
                             });
                             ui.end_row();
@@ -232,11 +281,17 @@ impl eframe::App for WpassApp {
                 });
             }
             MenuState::Password => {
-                // Check if password file is set
-                if let Some(passwords) = &mut self.passwords {
-                    // Ok, file exists, read the file and port into a textbox
+                // Check if password is set
+                if self.passwords.is_some() {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.add_sized(ui.available_size(), egui::TextEdit::multiline(passwords));
+                        let response = ui.add_sized(
+                            ui.available_size(),
+                            egui::TextEdit::multiline(self.passwords.as_mut().unwrap()),
+                        );
+                        if response.lost_focus() {
+                            self.try_sanitize_passwords();
+                            self.update_passwords_to_file();
+                        }
                     });
                 } else {
                     egui::CentralPanel::default().show(ctx, |ui| {
