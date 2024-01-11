@@ -5,12 +5,12 @@ use std::sync::mpsc;
 use std::fmt::Debug;
 #[derive(Debug)]
 enum TaskState<T: Send + 'static> {
-    NotStarted,
     Running,
     Finished(T),
     Failed(anyhow::Error),
 }
 
+#[derive(Debug)]
 pub struct Task<T: Send + 'static> {
     state: TaskState<T>,
     description: String,
@@ -20,7 +20,7 @@ pub struct Task<T: Send + 'static> {
 impl<T: Send + 'static> Task<T> {
     pub fn new(description: String, task: impl FnOnce() -> Result<T> + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
-        tokio::spawn(async move {
+        std::thread::spawn(move || {
             let result = task();
             tx.send(result).unwrap();
         });
@@ -28,7 +28,7 @@ impl<T: Send + 'static> Task<T> {
     }
     fn new_inner(description: String, rx: mpsc::Receiver<Result<T>>) -> Self {
         Self {
-            state: TaskState::NotStarted,
+            state: TaskState::Running,
             description,
             task: rx,
         }
@@ -36,7 +36,6 @@ impl<T: Send + 'static> Task<T> {
     fn ui(&self, ui: &mut egui::Ui) {
         ui.label(self.description.clone());
         ui.label(match &self.state {
-            TaskState::NotStarted => "_".to_string(),
             TaskState::Running => "...".to_string(),
             TaskState::Finished(_) => "√".to_string(),
             TaskState::Failed(e) => e.to_string(),
@@ -48,6 +47,7 @@ pub trait TaskDisplayer<T: Send + 'static> {
     fn display(&mut self, task: Task<T>);
 }
 
+#[derive(Debug)]
 pub struct Showcase<T: Send + 'static> {
     tasks: Vec<Task<T>>,
 }
@@ -59,9 +59,6 @@ impl<T: Send + Debug + 'static> Showcase<T> {
     pub fn poll(&mut self) {
         for task in self.tasks.iter_mut() {
             match task.state {
-                TaskState::NotStarted => {
-                    task.state = TaskState::Running;
-                }
                 TaskState::Running => match task.task.try_recv() {
                     Ok(result) => {
                         debug!("Task {} finished with result {:?}", task.description, result);
@@ -92,6 +89,7 @@ impl<T: Send + Debug + 'static> Showcase<T> {
                 egui::Grid::new("my_grid")
                     .num_columns(2)
                     .spacing([4.0, 4.0])
+                    .max_col_width(ui.available_width() / 2.0)
                     .striped(true)
                     .show(ui, |ui| {
                         for task in self.tasks.iter() {
@@ -109,5 +107,38 @@ impl<T: Send + Debug + 'static> Showcase<T> {
 impl<T: Send + 'static> TaskDisplayer<T> for Showcase<T> {
     fn display(&mut self, task: Task<T>) {
         self.tasks.push(task);
+    }
+}
+
+#[cfg(test)]
+mod test{
+    use crate::worker::TaskDisplayer;
+
+    #[test]
+    fn should_schedule_successful_task(){
+        let mut showcase = super::Showcase::new();
+        let task = super::Task::new("The answer to the ultimate question of life the universe and everything".to_string(), || {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            Ok("42")
+        });
+        showcase.display(task);
+        assert_eq!(showcase.length(), 1);
+        showcase.poll();
+        assert!(matches!(showcase.tasks[0].state, super::TaskState::Running));
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        showcase.poll();
+        assert!(matches!(showcase.tasks[0].state, super::TaskState::Finished("42")));
+    }
+
+    #[test]
+    fn should_schedule_failed_task(){
+        let mut showcase: crate::worker::Showcase<()> = super::Showcase::new();
+        let task = super::Task::new("The answer to the ultimate question of life the universe and everything".to_string(), || {
+            Err(anyhow::anyhow!("Failed"))
+        });
+        showcase.display(task);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        showcase.poll();
+        assert!(matches!(showcase.tasks[0].state, super::TaskState::Failed(_)));
     }
 }

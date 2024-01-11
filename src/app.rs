@@ -59,7 +59,7 @@ impl AppConfig {
 }
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct WPassApp {
     config: AppConfig,
@@ -106,6 +106,7 @@ impl WPassApp {
     pub fn init(&mut self) {
         debug!("Initializing app");
         self.update_passwords_from_file();
+        debug!("App initialized: {:?}", self);
     }
 
     fn update_passwords_from_file(&mut self) {
@@ -133,7 +134,11 @@ impl WPassApp {
         debug!("Sanitizing passwords");
         if self.config.sanitize {
             if let Some(passwords) = &mut self.passwords {
-                let mut dict = passwords.split('\n').map(|s| s.trim()).collect::<Vec<_>>();
+                let mut dict = passwords
+                    .split('\n')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>();
                 dict.sort();
                 dict.dedup();
                 *passwords = dict.join("\n");
@@ -186,6 +191,9 @@ impl WPassApp {
             }
         });
     }
+    fn ready_to_extract(&self) -> bool {
+        !self.config.archive_executable_path.is_empty() && self.passwords.is_some()
+    }
 }
 
 impl eframe::App for WPassApp {
@@ -200,9 +208,17 @@ impl eframe::App for WPassApp {
             // The top panel is often a good place for a menu bar:
             egui::menu::bar(ui, |ui| {
                 if ui.button("Main").clicked() {
+                    if self.menu_state == MenuState::Password {
+                        self.try_sanitize_passwords();
+                        self.update_passwords_to_file();
+                    }
                     self.menu_state = MenuState::Main;
                 }
                 if ui.button("Settings").clicked() {
+                    if self.menu_state == MenuState::Password {
+                        self.try_sanitize_passwords();
+                        self.update_passwords_to_file();
+                    }
                     self.menu_state = MenuState::Setting;
                 }
                 if ui.button("Passwords").clicked() {
@@ -214,14 +230,9 @@ impl eframe::App for WPassApp {
             MenuState::Main => {
                 if !ctx.input(|i| i.raw.hovered_files.is_empty()) {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        if self.task_showcase.length() == 0 {
-                            ui.centered_and_justified(|ui| {
-                                ui.label("Release here");
-                            });
-                        } else {
-                            self.task_showcase.poll();
-                            self.task_showcase.ui(ui);
-                        }
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Release here");
+                        });
                     });
                     let text = ctx.input(|i| {
                         let mut text = "Dropping files:\n".to_owned();
@@ -253,16 +264,21 @@ impl eframe::App for WPassApp {
                     );
                 } else {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        // The central panel the region left after adding TopPanel's and SidePanel's
-                        // Preview hovering files:
-                        ui.centered_and_justified(|ui| {
-                            ui.label("Drag & Drop a file here");
-                        });
+                        if self.task_showcase.length() == 0 {
+                            ui.centered_and_justified(|ui| {
+                                ui.label("Drag & Drop a file here");
+                            });
+                        } else {
+                            self.task_showcase.poll();
+                            self.task_showcase.ui(ui);
+                        }
                     });
                 }
                 ctx.input(|i| {
                     if !i.raw.dropped_files.is_empty() {
-                        self.schedule_files(&i.raw.dropped_files);
+                        if self.ready_to_extract() {
+                            self.schedule_files(&i.raw.dropped_files);
+                        }
                     }
                 });
             }
@@ -274,6 +290,7 @@ impl eframe::App for WPassApp {
                         .num_columns(2)
                         .spacing([20.0, 4.0])
                         .striped(true)
+                        .max_col_width(ui.available_width() / 2.0)
                         .show(ui, |ui| {
                             ui.label("Path to password file:");
                             ui.horizontal(|ui| {
