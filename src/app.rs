@@ -1,3 +1,5 @@
+use crate::worker::TaskDisplayer;
+use crate::worker::{Showcase, Task};
 use egui::{Align2, Color32, DroppedFile, Id, LayerId, Order, TextStyle, Vec2};
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -6,10 +8,9 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use wpass::{WPass, WPassInstance};
 
-use crate::worker::{Showcase, Task};
-
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 enum ExtractionMode {
     Local,
     NewDirectory,
@@ -22,31 +23,64 @@ enum MenuState {
     Password,
 }
 
-/// We derive Deserialize/Serialize so we can persist app state on shutdown.
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(default)] // if we add new fields, give them default values when deserializing old state
-pub struct WpassApp {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct AppConfig {
     password_file_path: String,
     archive_executable_path: String,
     extraction_mode: ExtractionMode,
     delete_after_extract: bool,
     sanitize: bool,
+}
+
+impl AppConfig {
+    pub fn calculate_output_path_for(&self, path: &PathBuf) -> PathBuf {
+        match self.extraction_mode {
+            ExtractionMode::Local => {
+                let mut output_path = path.clone();
+                output_path.pop();
+                if !output_path.is_dir() {
+                    output_path.push(".");
+                }
+                output_path
+            }
+            ExtractionMode::NewDirectory => {
+                let mut output_path = path.clone().with_extension("");
+                if output_path.exists() {
+                    output_path.pop();
+                    output_path.push(format!(
+                        "{}_extracted",
+                        path.file_stem().unwrap().to_str().unwrap()
+                    ));
+                }
+                output_path
+            }
+        }
+    }
+}
+
+/// We derive Deserialize/Serialize so we can persist app state on shutdown.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(default)] // if we add new fields, give them default values when deserializing old state
+pub struct WPassApp {
+    config: AppConfig,
     #[serde(skip)]
     menu_state: MenuState,
     #[serde(skip)]
     passwords: Option<String>,
     #[serde(skip)]
-    task_showcase: Showcase<()>,
+    task_showcase: Showcase<bool>,
 }
 
-impl Default for WpassApp {
+impl Default for WPassApp {
     fn default() -> Self {
         Self {
-            password_file_path: String::new(),
-            archive_executable_path: String::new(),
-            extraction_mode: ExtractionMode::Local,
-            delete_after_extract: false,
-            sanitize: true,
+            config: AppConfig {
+                password_file_path: String::new(),
+                archive_executable_path: String::new(),
+                extraction_mode: ExtractionMode::Local,
+                delete_after_extract: false,
+                sanitize: true,
+            },
             menu_state: MenuState::Main,
             passwords: None,
             task_showcase: Showcase::new(),
@@ -54,7 +88,7 @@ impl Default for WpassApp {
     }
 }
 
-impl WpassApp {
+impl WPassApp {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // This is also where you can customize the look and feel of egui using
@@ -76,7 +110,7 @@ impl WpassApp {
 
     fn update_passwords_from_file(&mut self) {
         debug!("Updating passwords");
-        let password_file_pathbuf = PathBuf::from(&self.password_file_path);
+        let password_file_pathbuf = PathBuf::from(&self.config.password_file_path);
         if Path::is_file(&password_file_pathbuf) {
             self.passwords = Some(fs::read_to_string(&password_file_pathbuf).unwrap());
         } else {
@@ -86,10 +120,10 @@ impl WpassApp {
     }
 
     fn update_passwords_to_file(&mut self) {
-        debug!("Writing passwords to {}", self.password_file_path);
+        debug!("Writing passwords to {}", self.config.password_file_path);
         // Let filesystem handle the file sync issue.
         // Start a new thread to do the job?
-        let password_file_pathbuf = PathBuf::from(&self.password_file_path);
+        let password_file_pathbuf = PathBuf::from(&self.config.password_file_path);
         if Path::is_file(&password_file_pathbuf) && self.passwords.is_some() {
             fs::write(&password_file_pathbuf, self.passwords.as_ref().unwrap()).unwrap();
         }
@@ -97,7 +131,7 @@ impl WpassApp {
 
     fn try_sanitize_passwords(&mut self) {
         debug!("Sanitizing passwords");
-        if self.sanitize {
+        if self.config.sanitize {
             if let Some(passwords) = &mut self.passwords {
                 let mut dict = passwords.split('\n').map(|s| s.trim()).collect::<Vec<_>>();
                 dict.sort();
@@ -108,40 +142,53 @@ impl WpassApp {
     }
 
     fn schedule_files(&mut self, files: &Vec<DroppedFile>) {
-        for file in files {
-            debug!("Handling file {:?}", file.path);
+        let current_config = self.config.clone();
+        let password_dict = if self.passwords.is_none() {
+            debug!("No password file set, will try to express with dummy passwords");
+            vec!["dummy".to_owned()]
+        } else {
+            debug!("Using password file");
+            self.passwords
+                .as_ref()
+                .unwrap()
+                .split('\n')
+                .map(|s| s.trim().to_owned())
+                .collect::<Vec<_>>()
+        };
+        files.iter().for_each(|file| {
             if let Some(path) = &file.path {
                 debug!("Extracting file {:?}", path);
-                let task = Task::new(path.display().to_string(), task);
-                self.task_showcase.display_task(move || {
-                    let mut cmd = std::process::Command::new("7z");
-                    cmd.arg("x");
-                    cmd.arg("-y");
-                    cmd.arg("-p");
-                    cmd.arg(&self.passwords.as_ref().unwrap());
-                    cmd.arg(path);
-                    match self.extraction_mode {
-                        ExtractionMode::Local => {
-                            cmd.arg("-o*");
+                let path = path.clone();
+                let current_config = current_config.clone();
+                let password_dict = password_dict.clone();
+                let task = Task::new(path.display().to_string(), move || {
+                    let wpass = WPassInstance::new(
+                        password_dict,
+                        current_config.archive_executable_path.clone().into(),
+                    );
+                    let output = current_config.calculate_output_path_for(&path);
+                    let extract_result = wpass.try_extract(&path, &output);
+                    match &extract_result {
+                        Ok(_) => {
+                            debug!("Extracted file {:?} to {:?}", path, output);
+                            if current_config.delete_after_extract {
+                                debug!("Deleting file {:?}", path);
+                                fs::remove_file(path).unwrap();
+                            }
                         }
-                        ExtractionMode::NewDirectory => {
-                            cmd.arg("-o*");
-                            cmd.arg("-r");
+                        Err(e) => {
+                            debug!("Failed to extract file {:?}: {}", path, e);
                         }
                     }
-                    let output = cmd.output().unwrap();
-                    debug!("7z output: {:?}", output);
-                    if self.delete_after_extract {
-                        debug!("Deleting file {:?}", path);
-                        fs::remove_file(path).unwrap();
-                    }
+                    extract_result
                 });
+                self.task_showcase.display(task);
             }
-        }
+        });
     }
 }
 
-impl eframe::App for WpassApp {
+impl eframe::App for WPassApp {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
@@ -149,8 +196,6 @@ impl eframe::App for WpassApp {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             // The top panel is often a good place for a menu bar:
             egui::menu::bar(ui, |ui| {
@@ -169,11 +214,14 @@ impl eframe::App for WpassApp {
             MenuState::Main => {
                 if !ctx.input(|i| i.raw.hovered_files.is_empty()) {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        // The central panel the region left after adding TopPanel's and SidePanel's
-                        // Preview hovering files:
-                        ui.centered_and_justified(|ui| {
-                            ui.label("Release here");
-                        });
+                        if self.task_showcase.length() == 0 {
+                            ui.centered_and_justified(|ui| {
+                                ui.label("Release here");
+                            });
+                        } else {
+                            self.task_showcase.poll();
+                            self.task_showcase.ui(ui);
+                        }
                     });
                     let text = ctx.input(|i| {
                         let mut text = "Dropping files:\n".to_owned();
@@ -231,14 +279,14 @@ impl eframe::App for WpassApp {
                             ui.horizontal(|ui| {
                                 let response = ui.add_sized(
                                     ui.available_size() - Vec2::new(60.0, 0.0),
-                                    egui::TextEdit::singleline(&mut self.password_file_path),
+                                    egui::TextEdit::singleline(&mut self.config.password_file_path),
                                 );
                                 if response.lost_focus() {
                                     self.update_passwords_from_file();
                                 }
                                 if ui.button("Browse").clicked() {
                                     if let Some(path) = rfd::FileDialog::new().pick_file() {
-                                        self.password_file_path = path.display().to_string();
+                                        self.config.password_file_path = path.display().to_string();
                                     }
                                     self.update_passwords_from_file();
                                 }
@@ -248,11 +296,14 @@ impl eframe::App for WpassApp {
                             ui.horizontal(|ui| {
                                 ui.add_sized(
                                     ui.available_size() - Vec2::new(60.0, 0.0),
-                                    egui::TextEdit::singleline(&mut self.archive_executable_path),
+                                    egui::TextEdit::singleline(
+                                        &mut self.config.archive_executable_path,
+                                    ),
                                 );
                                 if ui.button("Browse").clicked() {
                                     if let Some(path) = rfd::FileDialog::new().pick_file() {
-                                        self.archive_executable_path = path.display().to_string();
+                                        self.config.archive_executable_path =
+                                            path.display().to_string();
                                     }
                                 }
                             });
@@ -260,22 +311,22 @@ impl eframe::App for WpassApp {
                             ui.label("Extraction destination:");
                             ui.vertical(|ui| {
                                 ui.radio_value(
-                                    &mut self.extraction_mode,
+                                    &mut self.config.extraction_mode,
                                     ExtractionMode::Local,
                                     "Extract to the same directory",
                                 );
                                 ui.radio_value(
-                                    &mut self.extraction_mode,
+                                    &mut self.config.extraction_mode,
                                     ExtractionMode::NewDirectory,
                                     "Extract to a new directory",
                                 );
                             });
                             ui.end_row();
                             ui.label("Delete archive file:");
-                            ui.checkbox(&mut self.delete_after_extract, "");
+                            ui.checkbox(&mut self.config.delete_after_extract, "");
                             ui.end_row();
                             ui.label("Sanitize password file:");
-                            ui.checkbox(&mut self.sanitize, "");
+                            ui.checkbox(&mut self.config.sanitize, "");
                             ui.end_row();
                         });
                 });

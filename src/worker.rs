@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
-use egui::{scroll_area::ScrollBarVisibility, Grid, ScrollArea, Widget};
-use std::{error::Error, future::Future, process::Output, sync::mpsc};
-
+use egui::{scroll_area::ScrollBarVisibility, ScrollArea};
+use log::debug;
+use std::sync::mpsc;
+use std::fmt::Debug;
 #[derive(Debug)]
 enum TaskState<T: Send + 'static> {
     NotStarted,
@@ -43,33 +44,36 @@ impl<T: Send + 'static> Task<T> {
     }
 }
 
-trait TaskDisplayer<T: Send + 'static> {
-    fn display_task(&mut self, task: Task<T>);
+pub trait TaskDisplayer<T: Send + 'static> {
+    fn display(&mut self, task: Task<T>);
 }
 
 pub struct Showcase<T: Send + 'static> {
     tasks: Vec<Task<T>>,
 }
 
-impl<T: Send + 'static> Showcase<T> {
+impl<T: Send + Debug + 'static> Showcase<T> {
     pub fn new() -> Self {
         Self { tasks: Vec::new() }
     }
-    fn poll(&mut self) {
+    pub fn poll(&mut self) {
         for task in self.tasks.iter_mut() {
             match task.state {
                 TaskState::NotStarted => {
                     task.state = TaskState::Running;
                 }
                 TaskState::Running => match task.task.try_recv() {
-                    Ok(result) => match result {
-                        Ok(value) => {
-                            task.state = TaskState::Finished(value);
+                    Ok(result) => {
+                        debug!("Task {} finished with result {:?}", task.description, result);
+                        match result {
+                            Ok(value) => {
+                                task.state = TaskState::Finished(value);
+                            }
+                            Err(error) => {
+                                task.state = TaskState::Failed(error);
+                            }
                         }
-                        Err(error) => {
-                            task.state = TaskState::Failed(error);
-                        }
-                    },
+                    }
                     Err(mpsc::TryRecvError::Empty) => {}
                     Err(mpsc::TryRecvError::Disconnected) => {
                         task.state = TaskState::Failed(anyhow!("Task channel disconnected"));
@@ -97,10 +101,13 @@ impl<T: Send + 'static> Showcase<T> {
                     });
             });
     }
+    pub fn length(&self) -> usize {
+        self.tasks.len()
+    }
 }
 
 impl<T: Send + 'static> TaskDisplayer<T> for Showcase<T> {
-    fn display_task(&mut self, task: Task<T>) {
+    fn display(&mut self, task: Task<T>) {
         self.tasks.push(task);
     }
 }

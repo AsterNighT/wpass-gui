@@ -10,6 +10,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Wpass GUI",
         native_options,
-        Box::new(|cc| Box::new(wpass_gui::WpassApp::new(cc))),
+        Box::new(|cc| Box::new(wpass_gui::WPassApp::new(cc))),
     )
 }
