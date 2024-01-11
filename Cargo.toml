@@ -1,0 +1,19 @@
+[package]
+name = "wpass-gui"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+eframe = { version = "0.25.0", default-features = false, features = [
+    "default_fonts", # Embed the default egui fonts.
+    "glow",          # Use the glow rendering backend. Alternative: "wgpu".
+    "persistence",   # Enable restoring app state when restarting the app.
+] }
+egui = "0.25.0"
+env_logger = "0.10.1"
+log = "0.4.20"
+rfd = "0.12.1"
+serde = {version = "1.0.195", features = ["derive"]}
+wpass = {git = "https://github.com/asternight/wpass.git", branch = "master"}
