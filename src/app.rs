@@ -68,7 +68,7 @@ pub struct WPassApp {
     #[serde(skip)]
     passwords: Option<String>,
     #[serde(skip)]
-    task_showcase: Showcase<bool>,
+    task_showcase: Showcase<Vec<PathBuf>>,
 }
 
 impl Default for WPassApp {
@@ -148,17 +148,18 @@ impl WPassApp {
 
     fn schedule_files(&mut self, files: &Vec<DroppedFile>) {
         let current_config = self.config.clone();
-        let password_dict = if self.passwords.is_none() {
-            debug!("No password file set, will try to express with dummy passwords");
-            vec!["dummy".to_owned()]
-        } else {
-            debug!("Using password file");
-            self.passwords
-                .as_ref()
-                .unwrap()
-                .split('\n')
-                .map(|s| s.trim().to_owned())
-                .collect::<Vec<_>>()
+        let password_dict = match &self.passwords {
+            None => {
+                debug!("No password file set, this should not happen but will try to extract with dummy passwords");
+                vec!["dummy".to_owned()]
+            }
+            Some(passwords) => {
+                debug!("Using password: {}", passwords);
+                passwords
+                    .split('\n')
+                    .map(|s| s.trim().to_owned())
+                    .collect::<Vec<_>>()
+            }
         };
         files.iter().for_each(|file| {
             if let Some(path) = &file.path {
@@ -174,11 +175,11 @@ impl WPassApp {
                     let output = current_config.calculate_output_path_for(&path);
                     let extract_result = wpass.try_extract(&path, &output);
                     match &extract_result {
-                        Ok(_) => {
-                            debug!("Extracted file {:?} to {:?}", path, output);
+                        Ok(files) => {
+                            debug!("Extracted file {:?} to {:?}", files, output);
                             if current_config.delete_after_extract {
                                 debug!("Deleting file {:?}", path);
-                                fs::remove_file(path).unwrap();
+                                files.iter().try_for_each(fs::remove_file).unwrap();
                             }
                         }
                         Err(e) => {

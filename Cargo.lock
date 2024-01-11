@@ -2542,7 +2542,7 @@ dependencies = [
 [[package]]
 name = "wpass"
 version = "0.1.0"
-source = "git+https://github.com/AsterNighT/wpass.git?branch=master#d42b27c6c4c0fc733ff31a436ebf9eb9e95c8ede"
+source = "git+https://github.com/AsterNighT/wpass.git?branch=master#3f4e7d4c638c7f400325c536ba40c0df6a56ae64"
 dependencies = [
  "anyhow",
  "encoding",
