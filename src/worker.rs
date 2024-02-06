@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use egui::{scroll_area::ScrollBarVisibility, ScrollArea};
 use log::debug;
-use std::sync::mpsc;
 use std::fmt::Debug;
+use std::sync::mpsc;
 #[derive(Debug)]
 enum TaskState<T: Send + 'static> {
     Running,
@@ -35,10 +35,12 @@ impl<T: Send + 'static> Task<T> {
     }
     fn ui(&self, ui: &mut egui::Ui) {
         ui.label(self.description.clone());
-        ui.label(match &self.state {
-            TaskState::Running => "...".to_string(),
-            TaskState::Finished(_) => "√".to_string(),
-            TaskState::Failed(e) => e.to_string(),
+        ui.centered_and_justified(|ui| {
+            ui.label(match &self.state {
+                TaskState::Running => "...".to_string(),
+                TaskState::Finished(_) => "√".to_string(),
+                TaskState::Failed(e) => e.to_string(),
+            });
         });
     }
 }
@@ -61,7 +63,10 @@ impl<T: Send + Debug + 'static> Showcase<T> {
             match task.state {
                 TaskState::Running => match task.task.try_recv() {
                     Ok(result) => {
-                        debug!("Task {} finished with result {:?}", task.description, result);
+                        debug!(
+                            "Task {} finished with result {:?}",
+                            task.description, result
+                        );
                         match result {
                             Ok(value) => {
                                 task.state = TaskState::Finished(value);
@@ -111,34 +116,44 @@ impl<T: Send + 'static> TaskDisplayer<T> for Showcase<T> {
 }
 
 #[cfg(test)]
-mod test{
+mod test {
     use crate::worker::TaskDisplayer;
 
     #[test]
-    fn should_schedule_successful_task(){
+    fn should_schedule_successful_task() {
         let mut showcase = super::Showcase::new();
-        let task = super::Task::new("The answer to the ultimate question of life the universe and everything".to_string(), || {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            Ok("42")
-        });
+        let task = super::Task::new(
+            "The answer to the ultimate question of life the universe and everything".to_string(),
+            || {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                Ok("42")
+            },
+        );
         showcase.display(task);
         assert_eq!(showcase.length(), 1);
         showcase.poll();
         assert!(matches!(showcase.tasks[0].state, super::TaskState::Running));
         std::thread::sleep(std::time::Duration::from_secs(2));
         showcase.poll();
-        assert!(matches!(showcase.tasks[0].state, super::TaskState::Finished("42")));
+        assert!(matches!(
+            showcase.tasks[0].state,
+            super::TaskState::Finished("42")
+        ));
     }
 
     #[test]
-    fn should_schedule_failed_task(){
+    fn should_schedule_failed_task() {
         let mut showcase: crate::worker::Showcase<()> = super::Showcase::new();
-        let task = super::Task::new("The answer to the ultimate question of life the universe and everything".to_string(), || {
-            Err(anyhow::anyhow!("Failed"))
-        });
+        let task = super::Task::new(
+            "The answer to the ultimate question of life the universe and everything".to_string(),
+            || Err(anyhow::anyhow!("Failed")),
+        );
         showcase.display(task);
         std::thread::sleep(std::time::Duration::from_secs(1));
         showcase.poll();
-        assert!(matches!(showcase.tasks[0].state, super::TaskState::Failed(_)));
+        assert!(matches!(
+            showcase.tasks[0].state,
+            super::TaskState::Failed(_)
+        ));
     }
 }
